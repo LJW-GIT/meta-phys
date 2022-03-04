@@ -7,13 +7,13 @@ import cv2
 import numpy as np
 import random
 import math
-from torch.utils.data import Dataset, DataLoader
+from dataloader import MHDataLoader
 from torchvision import transforms
 import scipy.io as sio
 
 from PhysNet_META import PhysNet_padding_ED_peak
 
-from LoadVideo import VIPL_train, Normaliztion, ToTensor, RandomHorizontalFlip
+from LoadVideotrain import VIPL_train, Normaliztion, ToTensor, RandomHorizontalFlip
 
 from TorchLossComputer import TorchLossComputer
 
@@ -121,14 +121,14 @@ class AvgrageMeter(object):
         self.avg = self.sum / self.cnt
 
 
-def test(condition):
+def test(condition, scale):
     # GPU  & log file  -->   if use DataParallel, please comment this command
     os.environ["CUDA_VISIBLE_DEVICES"] = "%d" % (args.gpu)
 
-    isExists = os.path.exists(args.log)
+    isExists = os.path.exists(args.log + '/' + 'train_version' + str(condition))
     if not isExists:
-        os.makedirs(args.log)
-    log_file = open(args.log + '/' + args.log + '_test_condition_' + str(condition) + '_.txt', 'w')
+        os.makedirs(args.log+ '/' + 'train_version' + str(condition))
+    log_file = open(args.log + '/' + 'train_version' + str(condition) + '/'  +args.log + '_test_condition_' + 'scale'+ str(scale) + '_.txt', 'w')
 
     # k-fold cross-validation
     for ik in range(0, 1):
@@ -149,6 +149,7 @@ def test(condition):
         log_file.flush()
 
         model = PhysNet_padding_ED_peak()
+        model = torch.nn.DataParallel(model)
         model = model.cuda()
 
         model.load_state_dict(
@@ -157,24 +158,22 @@ def test(condition):
         torch.no_grad()
 
         criterion_Pearson = Neg_Pearson()
-
+        scale = args.scale
         loss_rPPG_avg = AvgrageMeter()
         loss_peak_avg = AvgrageMeter()
         loss_hr_rmse = AvgrageMeter()
 
         model.eval()
-        true_rppg_root = "data"  # 暂时没用
-        VIPL_trainDL = VIPL_train(true_rppg_root,
-                                  transform=transforms.Compose([Normaliztion(), RandomHorizontalFlip(), ToTensor()]),
+        # true_rppg_root = "data"  # 暂时没用
+        VIPL_trainDL = VIPL_train(scale,transform=transforms.Compose([Normaliztion(), RandomHorizontalFlip(), ToTensor()]),
                                   test=True)
 
-        dataloader_train = DataLoader(VIPL_trainDL, batch_size=4, shuffle=True, num_workers=4)  # batchsize = 4
+        dataloader_train = MHDataLoader(args,VIPL_trainDL, batch_size=1, shuffle=True, pin_memory=not args.cpu)  # batchsize = 4
         with torch.no_grad():
             for i, sample_batched in enumerate(dataloader_train):
                 # get the inputs
                 inputs, ecg = sample_batched['video_x'].cuda(), sample_batched['ecg'].cuda()
-                clip_average_HR, frame_rate = sample_batched['clip_average_HR'].cuda(), sample_batched[
-                    'frame_rate'].cuda()
+                clip_average_HR, frame_rate = sample_batched['clip_average_HR'].cuda(), sample_batched['frame_rate'].cuda()
 
                 rPPG_peak, x_visual, x_visual3232, x_visual1616 = model(inputs)
                 rPPG = rPPG_peak[:, 0, :]
@@ -183,7 +182,7 @@ def test(condition):
 
                 for t in range(0, len(rPPG.cpu().detach().numpy().tolist())):
                     draw_scatter(ecg.cpu().detach().numpy().tolist()[t], rPPG.cpu().detach().numpy().tolist()[t], 160,
-                                 str(i) + "_" + str(t), condition)
+                                 str(i) + "_" + str(t), condition, scale)
                     log_file.write("-----------------------------------------------------------------------\n")
                     log_file.write("frame_rate:\n")
                     log_file.write(str(frame_rate.cpu().detach().numpy().tolist()[t]))
@@ -217,7 +216,7 @@ def test(condition):
     log_file.close()
 
 
-def draw_scatter(GT, Pre, n, s, condition):
+def draw_scatter(GT, Pre, n, s, condition, scale):
     x1 = range(n)
     # 通过切片获取纵坐标R
     y1 = GT
@@ -241,11 +240,12 @@ def draw_scatter(GT, Pre, n, s, condition):
     # 调整横坐标的上下界
     # plt.xlim(xmax=5, xmin=0)
     # 显示
-    isExists = os.path.exists("./" + args.log + "bluePre_redGT_" + str(condition))
+    isExists = os.path.exists("./" + args.log + "bluePre_redGT_" + str(condition) + "/" + 'scale' +str(scale))
     if not isExists:
-        os.makedirs("./" + args.log + "bluePre_redGT_" + str(condition))
+        os.makedirs("./" + args.log + "bluePre_redGT_" + str(condition) + "/" + 'scale' +str(scale))
 
-    plt.savefig("./" + args.log + "bluePre_redGT_" + str(condition) + "/" + s + ".png")
+    plt.savefig("./" + args.log + "bluePre_redGT_" + str(condition) + "/" + 'scale' +str(scale) + '/' + s + ".png")
+    plt.close()
 
 
 if __name__ == "__main__":
@@ -260,9 +260,17 @@ if __name__ == "__main__":
     parser.add_argument('--log', type=str, default="SSTTFinallog_Constrative", help='log and save model name')
     parser.add_argument('--finetune', action='store_true', default=False, help='whether finetune other models')
     parser.add_argument('--test', default=False, help='whether test')
-
+    parser.add_argument('--version', default=3, help='version info')
+    parser.add_argument('--n_threads', type=int, default=6,help='number of threads for data loading')
+    parser.add_argument('--scale', type=str, default='', help='super resolution scale')
+    parser.add_argument('--cpu', action='store_true',help='use cpu only')
     args = parser.parse_args()
-
-    # for i in [1]:
-    test(4)
+    if args.scale=='':
+        args.scale = [1.0,1.1,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0,2.1,2.2,2.3,2.4,2.5,2.6,2.7,2.8,2.9,3.0,3.1,3.2,3.3,3.4,3.5,3.6,3.7,3.8,3.9,4.0]
+    else:
+        args.scale = list(map(lambda x: float(x), args.scale.split('+')))
+    backup = args.scale 
+    for scale in backup:
+        args.scale = [scale]
+        test(args.version, scale)
 
